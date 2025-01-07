@@ -1,9 +1,10 @@
 #pragma once
 
-#include <gsl/span>
+#include "CesiumImpl.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace DotNet::CesiumForUnity {
@@ -12,7 +13,7 @@ class NativeDownloadHandler;
 
 namespace CesiumForUnityNative {
 
-class NativeDownloadHandlerImpl {
+class NativeDownloadHandlerImpl : public CesiumImpl<NativeDownloadHandlerImpl> {
 public:
   NativeDownloadHandlerImpl(
       const ::DotNet::CesiumForUnity::NativeDownloadHandler& handler);

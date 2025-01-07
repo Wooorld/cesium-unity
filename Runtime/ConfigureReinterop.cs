@@ -57,6 +57,7 @@ namespace CesiumForUnity
         public void ExposeToCPP()
         {
             Camera c = Camera.main;
+            
             Transform t = c.transform;
             Vector3 u = t.up;
             Vector3 f = t.forward;
@@ -148,6 +149,7 @@ namespace CesiumForUnity
 
             Debug.Log("Logging");
             Debug.LogWarning("Warning");
+            Debug.LogError("Error");
 
             MeshRenderer meshRenderer = new MeshRenderer();
             GameObject meshGameObject = meshRenderer.gameObject;
@@ -157,6 +159,7 @@ namespace CesiumForUnity
             int crc = meshRenderer.material.ComputeCRC();
             meshRenderer.material.SetTexture(id, texture2D);
             meshRenderer.material.SetFloat(id, 1.0f);
+            meshRenderer.material.SetFloat(id, (float)CullMode.Off);
             meshRenderer.material.SetVector(id, new Vector4());
             meshRenderer.material.DisableKeyword("keywordName");
             meshRenderer.material.EnableKeyword("keywordName");
@@ -334,6 +337,31 @@ namespace CesiumForUnity
             webMapServiceRasterOverlay.maximumLevel = webMapServiceRasterOverlay.maximumLevel;
             baseOverlay = webMapServiceRasterOverlay;
 
+            CesiumWebMapTileServiceRasterOverlay webMapTileServiceRasterOverlay =
+                go.GetComponent<CesiumWebMapTileServiceRasterOverlay>();
+            webMapTileServiceRasterOverlay.baseUrl = webMapTileServiceRasterOverlay.baseUrl;
+            webMapTileServiceRasterOverlay.layer = webMapTileServiceRasterOverlay.layer;
+            webMapTileServiceRasterOverlay.style = webMapTileServiceRasterOverlay.style;
+            webMapTileServiceRasterOverlay.format = webMapTileServiceRasterOverlay.format;
+            webMapTileServiceRasterOverlay.tileMatrixSetID = webMapTileServiceRasterOverlay.tileMatrixSetID;
+            webMapTileServiceRasterOverlay.tileMatrixSetLabelPrefix = webMapTileServiceRasterOverlay.tileMatrixSetLabelPrefix;
+            webMapTileServiceRasterOverlay.specifyTileMatrixSetLabels = webMapTileServiceRasterOverlay.specifyTileMatrixSetLabels;
+            webMapTileServiceRasterOverlay.tileMatrixSetLabels = webMapTileServiceRasterOverlay.tileMatrixSetLabels;
+            webMapTileServiceRasterOverlay.projection = webMapTileServiceRasterOverlay.projection;
+            webMapTileServiceRasterOverlay.specifyTilingScheme = webMapTileServiceRasterOverlay.specifyTilingScheme;
+            webMapTileServiceRasterOverlay.rootTilesX = webMapTileServiceRasterOverlay.rootTilesX;
+            webMapTileServiceRasterOverlay.rootTilesY = webMapTileServiceRasterOverlay.rootTilesY;
+            webMapTileServiceRasterOverlay.rectangleEast = webMapTileServiceRasterOverlay.rectangleEast;
+            webMapTileServiceRasterOverlay.rectangleSouth = webMapTileServiceRasterOverlay.rectangleSouth;
+            webMapTileServiceRasterOverlay.rectangleWest = webMapTileServiceRasterOverlay.rectangleWest;
+            webMapTileServiceRasterOverlay.rectangleNorth = webMapTileServiceRasterOverlay.rectangleNorth;
+            webMapTileServiceRasterOverlay.specifyZoomLevels = webMapTileServiceRasterOverlay.specifyZoomLevels;
+            webMapTileServiceRasterOverlay.minimumLevel = webMapTileServiceRasterOverlay.minimumLevel;
+            webMapTileServiceRasterOverlay.maximumLevel = webMapTileServiceRasterOverlay.maximumLevel;
+            webMapTileServiceRasterOverlay.tileWidth = webMapTileServiceRasterOverlay.tileWidth;
+            webMapTileServiceRasterOverlay.tileHeight = webMapTileServiceRasterOverlay.tileHeight;
+            baseOverlay = webMapTileServiceRasterOverlay;
+
             CesiumRasterOverlay[] overlaysArray = go.GetComponents<CesiumRasterOverlay>();
             int len = overlaysArray.Length;
             overlay = overlaysArray[0];
@@ -368,6 +396,7 @@ namespace CesiumForUnity
             georeference.ecefX = georeference.ecefX;
             georeference.ecefY = georeference.ecefY;
             georeference.ecefZ = georeference.ecefZ;
+            georeference.originPlacement = georeference.originPlacement;
             georeference.originAuthority = georeference.originAuthority;
             georeference.scale = georeference.scale;
             double4x4 ecefToLocal = georeference.ecefToLocalMatrix;
@@ -453,10 +482,12 @@ namespace CesiumForUnity
             List<string> stringList = new List<string>();
             stringList.Add("item");
             stringList.Clear();
+            count = stringList.Count;
 
             string test = string.Concat("string", "string2");
             string[] stringArray = stringList.ToArray();
             test = stringArray[0];
+            test = stringList[0];
             test = string.Join(" ", stringArray);
             string.IsNullOrEmpty("value");
             string.IsNullOrWhiteSpace("value");
@@ -491,7 +522,13 @@ namespace CesiumForUnity
             CesiumGlobeAnchor globeAnchor = globeAnchors[globeAnchors.Length - 1];
             globeAnchor.positionGlobeFixed = globeAnchor.positionGlobeFixed;
 
-            CesiumSimplePlanarEllipsoidCurve planarEllipsoidCurve = CesiumSimplePlanarEllipsoidCurve.FromEarthCenteredEarthFixedCoordinates(new double3(0, 0, 0), new double3(0, 0, 0));
+            CesiumSimplePlanarEllipsoidCurve planarEllipsoidCurve = CesiumSimplePlanarEllipsoidCurve.FromCenteredFixedCoordinates(
+                CesiumEllipsoid.WGS84,
+                new double3(0, 0, 0), 
+                new double3(0, 0, 0));
+            CesiumEllipsoid ellipsoid = CesiumEllipsoid.WGS84;
+            ellipsoid.radii = new double3(0.0, 0.0, 0.0);
+            georeference.ellipsoid = ellipsoid;
 
             globeAnchor = go.AddComponent<CesiumGlobeAnchor>();
             globeAnchor.detectTransformChanges = globeAnchor.detectTransformChanges;
@@ -507,6 +544,7 @@ namespace CesiumForUnity
             globeAnchor._lastLocalPosition = new Vector3();
             globeAnchor._lastLocalRotation = new Quaternion();
             globeAnchor._lastLocalScale = new Vector3();
+            globeAnchor._lastEllipsoidRadii = new double3();
             globeAnchor.UpdateGeoreferenceIfNecessary();
 
             CesiumTileExcluder[] excluders = go.GetComponentsInParent<CesiumTileExcluder>();
@@ -517,6 +555,7 @@ namespace CesiumForUnity
             Cesium3DTile tile = new Cesium3DTile();
             tile._transform = new double4x4();
             tile._pTile = IntPtr.Zero;
+            tile._pTileEllipsoid = IntPtr.Zero;
 
             Cesium3DTileInfo info;
             info.usesAdditiveRefinement = true;
@@ -777,10 +816,13 @@ namespace CesiumForUnity
             property.valueType = property.valueType;
 
             RaycastHit hitInfo = new RaycastHit();
+            primitiveFeatures = hitInfo.transform.GetComponent<CesiumPrimitiveFeatures>();
             int triangleIndex = hitInfo.triangleIndex;
-            Vector3 coordinate = hitInfo.barycentricCoordinate;
+            Vector3 hitPoint = hitInfo.point;
+
             Vector2 textureCoordinate = new Vector2();
             textureCoordinate.x = textureCoordinate.y;
+            hitPoint = m2.MultiplyPoint3x4(hitPoint);
 
             CesiumIonServer server = CesiumIonServer.defaultServer;
             server.serverUrl = "";
@@ -839,6 +881,30 @@ namespace CesiumForUnity
             length = float2x2Array.Length;
             length = float3x3Array.Length;
             length = float4x4Array.Length;
+
+            CesiumCameraManager manager = CesiumCameraManager.GetOrCreate(go);
+            manager.useSceneViewCameraInEditor = false;
+            manager.useMainCamera = false;
+            Camera camera = null;
+            for (int i = 0; i < manager.additionalCameras.Count; ++i)
+            {
+                camera = manager.additionalCameras[i];
+            }
+
+            TaskCompletionSource<CesiumSampleHeightResult> promise = new TaskCompletionSource<CesiumSampleHeightResult>();
+            promise.SetException(new Exception("message"));
+            CesiumSampleHeightResult result = new CesiumSampleHeightResult();
+            result.longitudeLatitudeHeightPositions = null;
+            result.sampleSuccess = null;
+            result.warnings = null;
+            promise.SetResult(result);
+            Task<CesiumSampleHeightResult> task = promise.Task;
+
+            double3[] positions = null;
+            for (int i = 0; i < positions.Length; ++i)
+            {
+                positions[i] = positions[i];
+            }
 
 #if UNITY_EDITOR
             SceneView sv = SceneView.lastActiveSceneView;

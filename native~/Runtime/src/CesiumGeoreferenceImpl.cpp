@@ -5,8 +5,10 @@
 #include <CesiumGeospatial/LocalHorizontalCoordinateSystem.h>
 #include <CesiumUtility/Math.h>
 
+#include <DotNet/CesiumForUnity/CesiumEllipsoid.h>
 #include <DotNet/CesiumForUnity/CesiumGeoreference.h>
 #include <DotNet/CesiumForUnity/CesiumGeoreferenceOriginAuthority.h>
+#include <DotNet/CesiumForUnity/CesiumGeoreferenceOriginPlacement.h>
 #include <DotNet/CesiumForUnity/CesiumGlobeAnchor.h>
 #include <DotNet/System/Array1.h>
 #include <DotNet/UnityEngine/GameObject.h>
@@ -23,6 +25,22 @@ namespace {
 
 LocalHorizontalCoordinateSystem createCoordinateSystem(
     const DotNet::CesiumForUnity::CesiumGeoreference& georeference) {
+  double scale = 1.0 / georeference.scale();
+  if (georeference.originPlacement() ==
+      DotNet::CesiumForUnity::CesiumGeoreferenceOriginPlacement::TrueOrigin) {
+    // In True Origin mode, we want a coordinate system that:
+    // 1. Is at the origin,
+    // 2. Inverts Y to create a left-handed coordinate system,
+    // 3. Converts from Z-up to Y-up, and
+    // 4. Uses the georeference's scale
+    glm::dmat4 localToEcef(
+        glm::dvec4(scale, 0.0, 0.0, 0.0),
+        glm::dvec4(0.0, 0.0, scale, 0.0),
+        glm::dvec4(0.0, scale, 0.0, 0.0),
+        glm::dvec4(0.0, 0.0, 0.0, 1.0));
+    return LocalHorizontalCoordinateSystem(localToEcef);
+  }
+
   if (georeference.originAuthority() ==
       DotNet::CesiumForUnity::CesiumGeoreferenceOriginAuthority::
           LongitudeLatitudeHeight) {
@@ -34,7 +52,8 @@ LocalHorizontalCoordinateSystem createCoordinateSystem(
         LocalDirection::East,
         LocalDirection::Up,
         LocalDirection::North,
-        1.0 / georeference.scale());
+        scale,
+        georeference.ellipsoid().NativeImplementation().GetEllipsoid());
   } else {
     return LocalHorizontalCoordinateSystem(
         glm::dvec3(
@@ -44,7 +63,8 @@ LocalHorizontalCoordinateSystem createCoordinateSystem(
         LocalDirection::East,
         LocalDirection::Up,
         LocalDirection::North,
-        1.0 / georeference.scale());
+        scale,
+        georeference.ellipsoid().NativeImplementation().GetEllipsoid());
   }
 }
 

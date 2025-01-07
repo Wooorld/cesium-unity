@@ -1,11 +1,13 @@
 #include "Cesium3DTilesetImpl.h"
 
 #include "CameraManager.h"
+#include "CesiumEllipsoidImpl.h"
 #include "CesiumIonServerHelper.h"
 #include "UnityPrepareRendererResources.h"
 #include "UnityTileExcluderAdaptor.h"
 #include "UnityTilesetExternals.h"
 
+#include <Cesium3DTilesSelection/EllipsoidTilesetLoader.h>
 #include <Cesium3DTilesSelection/Tileset.h>
 #include <CesiumGeospatial/GlobeTransforms.h>
 #include <CesiumIonClient/Connection.h>
@@ -14,15 +16,23 @@
 #include <DotNet/CesiumForUnity/Cesium3DTileset.h>
 #include <DotNet/CesiumForUnity/Cesium3DTilesetLoadFailureDetails.h>
 #include <DotNet/CesiumForUnity/Cesium3DTilesetLoadType.h>
+#include <DotNet/CesiumForUnity/CesiumCameraManager.h>
 #include <DotNet/CesiumForUnity/CesiumDataSource.h>
+#include <DotNet/CesiumForUnity/CesiumEllipsoid.h>
 #include <DotNet/CesiumForUnity/CesiumGeoreference.h>
 #include <DotNet/CesiumForUnity/CesiumIonServer.h>
 #include <DotNet/CesiumForUnity/CesiumRasterOverlay.h>
+#include <DotNet/CesiumForUnity/CesiumSampleHeightResult.h>
 #include <DotNet/CesiumForUnity/CesiumTileExcluder.h>
+#include <DotNet/System/Exception.h>
 #include <DotNet/System/Object.h>
 #include <DotNet/System/String.h>
+#include <DotNet/System/Threading/Tasks/Task1.h>
+#include <DotNet/System/Threading/Tasks/TaskCompletionSource1.h>
+#include <DotNet/Unity/Mathematics/double3.h>
 #include <DotNet/UnityEngine/Application.h>
 #include <DotNet/UnityEngine/Camera.h>
+#include <DotNet/UnityEngine/Component.h>
 #include <DotNet/UnityEngine/Debug.h>
 #include <DotNet/UnityEngine/Experimental/Rendering/FormatUsage.h>
 #include <DotNet/UnityEngine/Experimental/Rendering/GraphicsFormat.h>
@@ -57,6 +67,7 @@ Cesium3DTilesetImpl::Cesium3DTilesetImpl(
       _updateInEditorCallback(nullptr),
 #endif
       _creditSystem(nullptr),
+      _cameraManager(nullptr),
       _destroyTilesetOnNextUpdate(false),
       _lastOpaqueMaterialHash(0) {
 }
@@ -84,7 +95,6 @@ void Cesium3DTilesetImpl::Update(
   }
 
   if (this->_destroyTilesetOnNextUpdate) {
-    this->_destroyTilesetOnNextUpdate = false;
     this->DestroyTileset(tileset);
   }
 
@@ -108,6 +118,11 @@ void Cesium3DTilesetImpl::Update(
   }
 
 #endif
+  if (this->_creditSystem == nullptr || this->_cameraManager == nullptr) {
+    // Refresh the tileset so it creates and uses a new credit system and camera
+    // manager.
+    this->DestroyTileset(tileset);
+  }
 
   if (!this->_pTileset) {
     this->LoadTileset(tileset);
@@ -116,7 +131,7 @@ void Cesium3DTilesetImpl::Update(
   }
 
   std::vector<ViewState> viewStates =
-      CameraManager::getAllCameras(tileset.gameObject());
+      CameraManager::getAllCameras(tileset, *this);
 
   const ViewUpdateResult& updateResult = this->_pTileset->updateView(
       viewStates,
@@ -203,6 +218,7 @@ void Cesium3DTilesetImpl::OnDisable(
 #endif
 
   this->_creditSystem = nullptr;
+  this->_cameraManager = nullptr;
 
   this->DestroyTileset(tileset);
 }
@@ -283,7 +299,7 @@ struct CalculateECEFCameraPosition {
   }
 
   glm::dvec3 operator()(const CesiumGeospatial::S2CellBoundingVolume& s2) {
-    return (*this)(s2.computeBoundingRegion());
+    return (*this)(s2.computeBoundingRegion(ellipsoid));
   }
 };
 } // namespace
@@ -336,6 +352,9 @@ void Cesium3DTilesetImpl::FocusTileset(
   DotNet::CesiumForUnity::CesiumGeoreference georeferenceComponent =
       tileset.gameObject()
           .GetComponentInParent<DotNet::CesiumForUnity::CesiumGeoreference>();
+  if (georeferenceComponent == nullptr) {
+    return;
+  }
 
   const CesiumGeospatial::LocalHorizontalCoordinateSystem& georeferenceCrs =
       georeferenceComponent.NativeImplementation().getCoordinateSystem(
@@ -343,11 +362,13 @@ void Cesium3DTilesetImpl::FocusTileset(
   const glm::dmat4& ecefToUnityWorld =
       georeferenceCrs.getEcefToLocalTransformation();
 
+  const CesiumGeospatial::Ellipsoid& ellipsoid =
+      georeferenceComponent.ellipsoid().NativeImplementation().GetEllipsoid();
+
   const BoundingVolume& boundingVolume =
       this->_pTileset->getRootTile()->getBoundingVolume();
-  glm::dvec3 ecefCameraPosition = std::visit(
-      CalculateECEFCameraPosition{CesiumGeospatial::Ellipsoid::WGS84},
-      boundingVolume);
+  glm::dvec3 ecefCameraPosition =
+      std::visit(CalculateECEFCameraPosition{ellipsoid}, boundingVolume);
   glm::dvec3 unityCameraPosition =
       glm::dvec3(ecefToUnityWorld * glm::dvec4(ecefCameraPosition, 1.0));
 
@@ -387,6 +408,99 @@ float Cesium3DTilesetImpl::ComputeLoadProgress(
   return getTileset()->computeLoadProgress();
 }
 
+System::Threading::Tasks::Task1<CesiumForUnity::CesiumSampleHeightResult>
+Cesium3DTilesetImpl::SampleHeightMostDetailed(
+    const CesiumForUnity::Cesium3DTileset& tileset,
+    const System::Array1<Unity::Mathematics::double3>&
+        longitudeLatitudeHeightPositions) {
+  if (this->getTileset() == nullptr) {
+    // Calling DestroyTileset ensures _destroyTilesetOnNextUpdate is reset.
+    this->DestroyTileset(tileset);
+    this->LoadTileset(tileset);
+  }
+
+  System::Threading::Tasks::TaskCompletionSource1<
+      CesiumForUnity::CesiumSampleHeightResult>
+      promise{};
+
+  std::vector<CesiumGeospatial::Cartographic> positions;
+  positions.reserve(longitudeLatitudeHeightPositions.Length());
+
+  for (int32_t i = 0, len = longitudeLatitudeHeightPositions.Length(); i < len;
+       ++i) {
+    Unity::Mathematics::double3 position = longitudeLatitudeHeightPositions[i];
+    positions.emplace_back(CesiumGeospatial::Cartographic::fromDegrees(
+        position.x,
+        position.y,
+        position.z));
+  }
+
+  auto sampleHeights = [this, &positions]() mutable {
+    if (this->getTileset()) {
+      return this->getTileset()
+          ->sampleHeightMostDetailed(positions)
+          .catchImmediately([positions = std::move(positions)](
+                                std::exception&& exception) mutable {
+            std::vector<bool> sampleSuccess(positions.size(), false);
+            return Cesium3DTilesSelection::SampleHeightResult{
+                std::move(positions),
+                std::move(sampleSuccess),
+                {exception.what()}};
+          });
+    } else {
+      std::vector<bool> sampleSuccess(positions.size(), false);
+      return getAsyncSystem().createResolvedFuture(
+          Cesium3DTilesSelection::SampleHeightResult{
+              std::move(positions),
+              std::move(sampleSuccess),
+              {"Could not sample heights from tileset because it has not "
+               "been created."}});
+    }
+  };
+
+  sampleHeights()
+      .thenImmediately(
+          [promise](Cesium3DTilesSelection::SampleHeightResult&& result) {
+            System::Array1<Unity::Mathematics::double3> positions(
+                result.positions.size());
+            for (size_t i = 0; i < result.positions.size(); ++i) {
+              const CesiumGeospatial::Cartographic& positionRadians =
+                  result.positions[i];
+              positions.Item(
+                  i,
+                  Unity::Mathematics::double3{
+                      CesiumUtility::Math::radiansToDegrees(
+                          positionRadians.longitude),
+                      CesiumUtility::Math::radiansToDegrees(
+                          positionRadians.latitude),
+                      positionRadians.height});
+            }
+
+            System::Array1<bool> sampleSuccess(result.sampleSuccess.size());
+            for (size_t i = 0; i < result.sampleSuccess.size(); ++i) {
+              sampleSuccess.Item(i, result.sampleSuccess[i]);
+            }
+
+            System::Array1<System::String> warnings(result.warnings.size());
+            for (size_t i = 0; i < result.warnings.size(); ++i) {
+              warnings.Item(i, System::String(result.warnings[i]));
+            }
+
+            CesiumForUnity::CesiumSampleHeightResult unityResult;
+            unityResult.longitudeLatitudeHeightPositions(positions);
+            unityResult.sampleSuccess(sampleSuccess);
+            unityResult.warnings(warnings);
+
+            promise.SetResult(unityResult);
+          })
+      .catchImmediately([promise](std::exception&& exception) {
+        promise.SetException(
+            System::Exception(System::String(exception.what())));
+      });
+
+  return promise.Task();
+}
+
 Tileset* Cesium3DTilesetImpl::getTileset() { return this->_pTileset.get(); }
 
 const Tileset* Cesium3DTilesetImpl::getTileset() const {
@@ -400,6 +514,16 @@ Cesium3DTilesetImpl::getCreditSystem() const {
 void Cesium3DTilesetImpl::setCreditSystem(
     const DotNet::CesiumForUnity::CesiumCreditSystem& creditSystem) {
   this->_creditSystem = creditSystem;
+}
+
+const DotNet::CesiumForUnity::CesiumCameraManager&
+Cesium3DTilesetImpl::getCameraManager() const {
+  return this->_cameraManager;
+}
+
+void Cesium3DTilesetImpl::setCameraManager(
+    const DotNet::CesiumForUnity::CesiumCameraManager& cameraManager) {
+  this->_cameraManager = cameraManager;
 }
 
 void Cesium3DTilesetImpl::updateLastViewUpdateResultState(
@@ -450,6 +574,8 @@ void Cesium3DTilesetImpl::DestroyTileset(
   }
 
   this->_pTileset.reset();
+
+  this->_destroyTilesetOnNextUpdate = false;
 }
 
 void Cesium3DTilesetImpl::LoadTileset(
@@ -486,6 +612,14 @@ void Cesium3DTilesetImpl::LoadTileset(
   // Generous per-frame time limits for loading / unloading on main thread.
   options.mainThreadLoadingTimeLimit = 5.0;
   options.tileCacheUnloadTimeLimit = 5.0;
+
+  DotNet::CesiumForUnity::CesiumGeoreference georeferenceComponent =
+      tileset.gameObject()
+          .GetComponentInParent<DotNet::CesiumForUnity::CesiumGeoreference>();
+  if (georeferenceComponent != nullptr) {
+    options.ellipsoid =
+        georeferenceComponent.ellipsoid().NativeImplementation().GetEllipsoid();
+  }
 
   TilesetContentOptions contentOptions{};
   contentOptions.generateMissingNormalsSmooth = tileset.generateSmoothNormals();
@@ -552,6 +686,10 @@ void Cesium3DTilesetImpl::LoadTileset(
 
   options.contentOptions = contentOptions;
 
+  CesiumForUnity::CesiumCameraManager cameraManager =
+      CesiumForUnity::CesiumCameraManager::GetOrCreate(tileset.gameObject());
+  this->setCameraManager(cameraManager);
+
   this->_lastUpdateResult = ViewUpdateResult();
 
   if (tileset.tilesetSource() ==
@@ -579,6 +717,12 @@ void Cesium3DTilesetImpl::LoadTileset(
       // Resolve the API URL if it's not already in progress.
       resolveCesiumIonApiUrl(tileset.ionServer());
     }
+  } else if (
+      tileset.tilesetSource() ==
+      CesiumForUnity::CesiumDataSource::FromEllipsoid) {
+    this->_pTileset = EllipsoidTilesetLoader::createTileset(
+        createTilesetExternals(tileset),
+        options);
   } else {
     this->_pTileset = std::make_unique<Tileset>(
         createTilesetExternals(tileset),

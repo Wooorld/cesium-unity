@@ -1,5 +1,6 @@
 #include "CameraManager.h"
 
+#include "Cesium3DTilesetImpl.h"
 #include "CesiumGeoreferenceImpl.h"
 #include "UnityTransforms.h"
 
@@ -7,7 +8,10 @@
 #include <CesiumGeospatial/GlobeTransforms.h>
 #include <CesiumUtility/Math.h>
 
+#include <DotNet/CesiumForUnity/Cesium3DTileset.h>
+#include <DotNet/CesiumForUnity/CesiumEllipsoid.h>
 #include <DotNet/CesiumForUnity/CesiumGeoreference.h>
+#include <DotNet/System/Collections/Generic/List1.h>
 #include <DotNet/UnityEngine/Camera.h>
 #include <DotNet/UnityEngine/GameObject.h>
 #include <DotNet/UnityEngine/Matrix4x4.h>
@@ -25,6 +29,7 @@ using namespace CesiumGeospatial;
 using namespace CesiumUtility;
 using namespace DotNet::UnityEngine;
 using namespace DotNet::CesiumForUnity;
+using namespace DotNet;
 
 #if UNITY_EDITOR
 using namespace DotNet::UnityEditor;
@@ -35,9 +40,10 @@ namespace CesiumForUnityNative {
 namespace {
 
 ViewState unityCameraToViewState(
+    const CesiumGeoreference& georeference,
     const LocalHorizontalCoordinateSystem* pCoordinateSystem,
     const glm::dmat4& unityWorldToTileset,
-    Camera& camera) {
+    const Camera& camera) {
   Transform transform = camera.transform();
 
   Vector3 cameraPositionUnity = transform.position();
@@ -71,25 +77,75 @@ ViewState unityCameraToViewState(
   double horizontalFOV =
       2 * glm::atan(camera.aspect() * glm::tan(verticalFOV * 0.5));
 
+  const CesiumGeospatial::Ellipsoid& ellipsoid =
+      georeference != nullptr
+          ? georeference.ellipsoid().NativeImplementation().GetEllipsoid()
+          : CesiumGeospatial::Ellipsoid::WGS84;
+
   return ViewState::create(
       cameraPosition,
       glm::normalize(cameraDirection),
       glm::normalize(cameraUp),
       glm::dvec2(camera.pixelWidth(), camera.pixelHeight()),
       horizontalFOV,
-      verticalFOV);
+      verticalFOV,
+      ellipsoid);
 }
 
 } // namespace
 
-std::vector<ViewState> CameraManager::getAllCameras(const GameObject& context) {
+namespace {
+
+void addMainCamera(
+    std::vector<ViewState>& result,
+    const CesiumGeoreference& georeferenceComponent,
+    const CesiumGeospatial::LocalHorizontalCoordinateSystem* pCoordinateSystem,
+    const glm::dmat4& unityWorldToTileset) {
+  Camera camera = Camera::main();
+  if (camera != nullptr) {
+    result.emplace_back(unityCameraToViewState(
+        georeferenceComponent,
+        pCoordinateSystem,
+        unityWorldToTileset,
+        camera));
+  }
+}
+
+void addActiveSceneCameraInEditor(
+    std::vector<ViewState>& result,
+    const CesiumGeoreference& georeferenceComponent,
+    const CesiumGeospatial::LocalHorizontalCoordinateSystem* pCoordinateSystem,
+    const glm::dmat4& unityWorldToTileset) {
+#if UNITY_EDITOR
+  if (!EditorApplication::isPlaying()) {
+    SceneView lastActiveEditorView = SceneView::lastActiveSceneView();
+    if (lastActiveEditorView != nullptr) {
+      Camera editorCamera = lastActiveEditorView.camera();
+      if (editorCamera != nullptr) {
+        result.emplace_back(unityCameraToViewState(
+            georeferenceComponent,
+            pCoordinateSystem,
+            unityWorldToTileset,
+            editorCamera));
+      }
+    }
+  }
+#endif
+}
+
+} // namespace
+
+/*static*/ std::vector<Cesium3DTilesSelection::ViewState>
+CameraManager::getAllCameras(
+    const DotNet::CesiumForUnity::Cesium3DTileset& tileset,
+    const CesiumForUnityNative::Cesium3DTilesetImpl& impl) {
   const LocalHorizontalCoordinateSystem* pCoordinateSystem = nullptr;
 
   glm::dmat4 unityWorldToTileset =
-      UnityTransforms::fromUnity(context.transform().worldToLocalMatrix());
+      UnityTransforms::fromUnity(tileset.transform().worldToLocalMatrix());
 
   CesiumGeoreference georeferenceComponent =
-      context.GetComponentInParent<CesiumGeoreference>();
+      tileset.gameObject().GetComponentInParent<CesiumGeoreference>();
   if (georeferenceComponent != nullptr) {
     CesiumGeoreferenceImpl& georeference =
         georeferenceComponent.NativeImplementation();
@@ -98,26 +154,40 @@ std::vector<ViewState> CameraManager::getAllCameras(const GameObject& context) {
   }
 
   std::vector<ViewState> result;
-  Camera camera = Camera::main();
-  if (camera != nullptr) {
-    result.emplace_back(
-        unityCameraToViewState(pCoordinateSystem, unityWorldToTileset, camera));
+
+  const CesiumCameraManager& cameraManager = impl.getCameraManager();
+
+  if (cameraManager == nullptr || cameraManager.useMainCamera()) {
+    addMainCamera(
+        result,
+        georeferenceComponent,
+        pCoordinateSystem,
+        unityWorldToTileset);
   }
 
-#if UNITY_EDITOR
-  if (!EditorApplication::isPlaying()) {
-    SceneView lastActiveEditorView = SceneView::lastActiveSceneView();
-    if (lastActiveEditorView != nullptr) {
-      Camera editorCamera = lastActiveEditorView.camera();
-      if (editorCamera != nullptr) {
-        result.emplace_back(unityCameraToViewState(
-            pCoordinateSystem,
-            unityWorldToTileset,
-            editorCamera));
-      }
+  if (cameraManager == nullptr || cameraManager.useSceneViewCameraInEditor()) {
+    addActiveSceneCameraInEditor(
+        result,
+        georeferenceComponent,
+        pCoordinateSystem,
+        unityWorldToTileset);
+  }
+
+  if (cameraManager != nullptr) {
+    System::Collections::Generic::List1<Camera> cameras =
+        cameraManager.additionalCameras();
+    for (int32_t i = 0, len = cameras.Count(); i < len; ++i) {
+      Camera camera = cameras[i];
+      if (camera == nullptr)
+        continue;
+
+      result.emplace_back(unityCameraToViewState(
+          georeferenceComponent,
+          pCoordinateSystem,
+          unityWorldToTileset,
+          camera));
     }
   }
-#endif
 
   return result;
 }

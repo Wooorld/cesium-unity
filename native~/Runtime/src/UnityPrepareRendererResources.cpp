@@ -56,6 +56,7 @@
 #include <DotNet/UnityEngine/Object.h>
 #include <DotNet/UnityEngine/Physics.h>
 #include <DotNet/UnityEngine/Quaternion.h>
+#include <DotNet/UnityEngine/Rendering/CullMode.h>
 #include <DotNet/UnityEngine/Rendering/IndexFormat.h>
 #include <DotNet/UnityEngine/Rendering/MeshUpdateFlags.h>
 #include <DotNet/UnityEngine/Rendering/SubMeshDescriptor.h>
@@ -160,11 +161,11 @@ template <typename TIndex> struct CopyVertexColors {
     bool success = true;
     if (duplicateVertices) {
       for (size_t i = 0; success && i < vertexCount; ++i) {
-        if (i >= colorView.size()) {
+        TIndex vertexIndex = indices[i];
+        if (vertexIndex < 0 || vertexIndex >= colorView.size()) {
           success = false;
         } else {
           Color32& packedColor = *reinterpret_cast<Color32*>(pWritePos);
-          TIndex vertexIndex = indices[i];
           success = CopyVertexColors::convertColor(
               colorView[vertexIndex],
               packedColor);
@@ -267,13 +268,22 @@ void generateMipMaps(
       const Sampler* pSampler =
           Model::getSafe(&pModel->samplers, pTexture->sampler);
       if (pImage && pSampler) {
+        // We currently do not support shared resources, so if this image is
+        // associated with a depot, unshare it. This is necessary to avoid a
+        // race condition where multiple threads attempt to generate mipmaps for
+        // the same shared image simultaneously.
+        if (pImage->pAsset && pImage->pAsset->getDepot()) {
+          // Copy the asset.
+          pImage->pAsset.emplace(*pImage->pAsset);
+        }
+
         switch (pSampler->minFilter.value_or(
             CesiumGltf::Sampler::MinFilter::LINEAR_MIPMAP_LINEAR)) {
         case CesiumGltf::Sampler::MinFilter::LINEAR_MIPMAP_LINEAR:
         case CesiumGltf::Sampler::MinFilter::LINEAR_MIPMAP_NEAREST:
         case CesiumGltf::Sampler::MinFilter::NEAREST_MIPMAP_LINEAR:
         case CesiumGltf::Sampler::MinFilter::NEAREST_MIPMAP_NEAREST:
-          CesiumGltfReader::GltfReader::generateMipMaps(pImage->cesium);
+          CesiumGltfReader::ImageDecoder::generateMipMaps(*pImage->pAsset);
         }
       }
     }
@@ -337,6 +347,43 @@ void loadPrimitive(
     return;
   }
 
+  const CesiumGltf::Material* pMaterial =
+      Model::getSafe(&gltf.materials, primitive.material);
+
+  primitiveInfo.isUnlit =
+      pMaterial && pMaterial->hasExtension<ExtensionKhrMaterialsUnlit>();
+
+  bool hasNormals = false;
+  bool computeFlatNormals = false;
+  auto normalAccessorIt = primitive.attributes.find("NORMAL");
+  AccessorView<UnityEngine::Vector3> normalView;
+  if (normalAccessorIt != primitive.attributes.end()) {
+    normalView =
+        AccessorView<UnityEngine::Vector3>(gltf, normalAccessorIt->second);
+    hasNormals = normalView.status() == AccessorViewStatus::Valid;
+  } else if (
+      !primitiveInfo.isUnlit && primitive.mode != MeshPrimitive::Mode::POINTS) {
+    computeFlatNormals = hasNormals = true;
+  }
+
+  // Check if  we need to upgrade to a large index type to accommodate the
+  // larger number of vertices we need for flat normals.
+  if (computeFlatNormals && indexFormat == IndexFormat::UInt16 &&
+      indexCount >= std::numeric_limits<uint16_t>::max()) {
+    loadPrimitive<uint32_t>(
+        meshData,
+        primitiveInfo,
+        gltf,
+        node,
+        mesh,
+        primitive,
+        transform,
+        indicesView,
+        IndexFormat::UInt32,
+        positionView);
+    return;
+  }
+
   meshData.SetIndexBufferParams(indexCount, indexFormat);
   const Unity::Collections::NativeArray1<TIndex>& dest =
       meshData.GetIndexData<TIndex>();
@@ -344,12 +391,14 @@ void loadPrimitive(
       Unity::Collections::LowLevel::Unsafe::NativeArrayUnsafeUtility::
           GetUnsafeBufferPointerWithoutChecks(dest));
 
-  if (primitive.mode == MeshPrimitive::Mode::TRIANGLES ||
-      primitive.mode == MeshPrimitive::Mode::POINTS) {
+  switch (primitive.mode) {
+  case MeshPrimitive::Mode::TRIANGLES:
+  case MeshPrimitive::Mode::POINTS:
     for (int64_t i = 0; i < indicesView.size(); ++i) {
       indices[i] = indicesView[i];
     }
-  } else if (primitive.mode == MeshPrimitive::Mode::TRIANGLE_STRIP) {
+    break;
+  case MeshPrimitive::Mode::TRIANGLE_STRIP:
     for (int64_t i = 0; i < indicesView.size() - 2; ++i) {
       if (i % 2) {
         indices[3 * i] = indicesView[i];
@@ -361,13 +410,15 @@ void loadPrimitive(
         indices[3 * i + 2] = indicesView[i + 2];
       }
     }
-  } else { // MeshPrimitive::Mode::TRIANGLE_FAN
-    TIndex i0 = indicesView[0];
+    break;
+  case MeshPrimitive::Mode::TRIANGLE_FAN:
+  default:
     for (int64_t i = 2; i < indicesView.size(); ++i) {
-      indices[3 * i] = i0;
+      indices[3 * i] = indicesView[0];
       indices[3 * i + 1] = indicesView[i - 1];
       indices[3 * i + 2] = indicesView[i];
     }
+    break;
   }
 
   // Max attribute count supported by Unity, see VertexAttribute.
@@ -385,25 +436,7 @@ void loadPrimitive(
   descriptor[numberOfAttributes].stream = streamIndex;
   ++numberOfAttributes;
 
-  const CesiumGltf::Material* pMaterial =
-      Model::getSafe(&gltf.materials, primitive.material);
-
-  primitiveInfo.isUnlit =
-      pMaterial && pMaterial->hasExtension<ExtensionKhrMaterialsUnlit>();
-
   // Add the NORMAL attribute, if it exists.
-  bool hasNormals = false;
-  bool computeFlatNormals = false;
-  auto normalAccessorIt = primitive.attributes.find("NORMAL");
-  AccessorView<UnityEngine::Vector3> normalView;
-  if (normalAccessorIt != primitive.attributes.end()) {
-    normalView =
-        AccessorView<UnityEngine::Vector3>(gltf, normalAccessorIt->second);
-    hasNormals = normalView.status() == AccessorViewStatus::Valid;
-  } else if (
-      !primitiveInfo.isUnlit && primitive.mode != MeshPrimitive::Mode::POINTS) {
-    computeFlatNormals = hasNormals = true;
-  }
   if (hasNormals) {
     assert(numberOfAttributes < MAX_ATTRIBUTES);
     descriptor[numberOfAttributes].attribute = VertexAttribute::Normal;
@@ -1020,6 +1053,33 @@ void setGltfMaterialParameterValues(
     const TilesetMaterialProperties& materialProperties) {
   CESIUM_TRACE("Cesium::CreateMaterials");
 
+  // These similar-sounding material properties are used in various render
+  // pipelines (built-in, URP, HDRP). Rather than try to figure out which
+  // applies, we just set them all.
+  if (gltfMaterial.doubleSided) {
+    unityMaterial.SetFloat(materialProperties.getDoubleSidedEnableID(), 1.0f);
+    unityMaterial.SetFloat(
+        materialProperties.getCullID(),
+        float(UnityEngine::Rendering::CullMode::Off));
+    unityMaterial.SetFloat(
+        materialProperties.getCullModeID(),
+        float(UnityEngine::Rendering::CullMode::Off));
+    unityMaterial.SetFloat(
+        materialProperties.getBuiltInCullModeID(),
+        float(UnityEngine::Rendering::CullMode::Off));
+  } else {
+    unityMaterial.SetFloat(materialProperties.getDoubleSidedEnableID(), 0.0f);
+    unityMaterial.SetFloat(
+        materialProperties.getCullID(),
+        float(UnityEngine::Rendering::CullMode::Back));
+    unityMaterial.SetFloat(
+        materialProperties.getCullModeID(),
+        float(UnityEngine::Rendering::CullMode::Back));
+    unityMaterial.SetFloat(
+        materialProperties.getBuiltInCullModeID(),
+        float(UnityEngine::Rendering::CullMode::Back));
+  }
+
   const CesiumGltf::MaterialPBRMetallicRoughness& pbr =
       gltfMaterial.pbrMetallicRoughness
           ? gltfMaterial.pbrMetallicRoughness.value()
@@ -1043,7 +1103,7 @@ void setGltfMaterialParameterValues(
         primitiveInfo.uvIndexMap.find(baseColorTexture->texCoord);
     if (texCoordIndexIt != primitiveInfo.uvIndexMap.end()) {
       UnityEngine::Texture texture =
-          TextureLoader::loadTexture(model, baseColorTexture->index);
+          TextureLoader::loadTexture(model, baseColorTexture->index, true);
       if (texture != nullptr) {
         texture.hideFlags(DotNet::UnityEngine::HideFlags::HideAndDontSave);
         unityMaterial.SetTexture(
@@ -1063,7 +1123,7 @@ void setGltfMaterialParameterValues(
         primitiveInfo.uvIndexMap.find(metallicRoughness->texCoord);
     if (texCoordIndexIt != primitiveInfo.uvIndexMap.end()) {
       UnityEngine::Texture texture =
-          TextureLoader::loadTexture(model, metallicRoughness->index);
+          TextureLoader::loadTexture(model, metallicRoughness->index, false);
       if (texture != nullptr) {
         texture.hideFlags(DotNet::UnityEngine::HideFlags::HideAndDontSave);
         unityMaterial.SetTexture(
@@ -1086,7 +1146,8 @@ void setGltfMaterialParameterValues(
     if (texCoordIndexIt != primitiveInfo.uvIndexMap.end()) {
       UnityEngine::Texture texture = TextureLoader::loadTexture(
           model,
-          gltfMaterial.emissiveTexture->index);
+          gltfMaterial.emissiveTexture->index,
+          true);
       if (texture != nullptr) {
         texture.hideFlags(DotNet::UnityEngine::HideFlags::HideAndDontSave);
         unityMaterial.SetTexture(
@@ -1103,8 +1164,10 @@ void setGltfMaterialParameterValues(
     auto texCoordIndexIt =
         primitiveInfo.uvIndexMap.find(gltfMaterial.normalTexture->texCoord);
     if (texCoordIndexIt != primitiveInfo.uvIndexMap.end()) {
-      UnityEngine::Texture texture =
-          TextureLoader::loadTexture(model, gltfMaterial.normalTexture->index);
+      UnityEngine::Texture texture = TextureLoader::loadTexture(
+          model,
+          gltfMaterial.normalTexture->index,
+          false);
       if (texture != nullptr) {
         texture.hideFlags(DotNet::UnityEngine::HideFlags::HideAndDontSave);
         unityMaterial.SetTexture(
@@ -1126,7 +1189,8 @@ void setGltfMaterialParameterValues(
     if (texCoordIndexIt != primitiveInfo.uvIndexMap.end()) {
       UnityEngine::Texture texture = TextureLoader::loadTexture(
           model,
-          gltfMaterial.occlusionTexture->index);
+          gltfMaterial.occlusionTexture->index,
+          false);
       if (texture != nullptr) {
         texture.hideFlags(DotNet::UnityEngine::HideFlags::HideAndDontSave);
         unityMaterial.SetTexture(
@@ -1686,9 +1750,9 @@ void UnityPrepareRendererResources::free(
 }
 
 void* UnityPrepareRendererResources::prepareRasterInLoadThread(
-    CesiumGltf::ImageCesium& image,
+    CesiumGltf::ImageAsset& image,
     const std::any& rendererOptions) {
-  CesiumGltfReader::GltfReader::generateMipMaps(image);
+  CesiumGltfReader::ImageDecoder::generateMipMaps(image);
   return nullptr;
 }
 
@@ -1696,7 +1760,7 @@ void* UnityPrepareRendererResources::prepareRasterInMainThread(
     CesiumRasterOverlays::RasterOverlayTile& rasterTile,
     void* pLoadThreadResult) {
   auto pTexture = std::make_unique<UnityEngine::Texture>(
-      TextureLoader::loadTexture(rasterTile.getImage()));
+      TextureLoader::loadTexture(*rasterTile.getImage(), true));
   pTexture->wrapMode(UnityEngine::TextureWrapMode::Clamp);
   pTexture->filterMode(UnityEngine::FilterMode::Trilinear);
   pTexture->anisoLevel(16);

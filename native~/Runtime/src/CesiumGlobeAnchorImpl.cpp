@@ -1,11 +1,13 @@
 #include "CesiumGlobeAnchorImpl.h"
 
+#include "CesiumEllipsoidImpl.h"
 #include "UnityTransforms.h"
 
 #include <CesiumGeometry/Transforms.h>
 #include <CesiumGeospatial/GlobeAnchor.h>
 #include <CesiumGeospatial/LocalHorizontalCoordinateSystem.h>
 
+#include <DotNet/CesiumForUnity/CesiumEllipsoid.h>
 #include <DotNet/CesiumForUnity/CesiumGeoreference.h>
 #include <DotNet/CesiumForUnity/CesiumGlobeAnchor.h>
 #include <DotNet/Unity/Mathematics/double3.h>
@@ -14,7 +16,7 @@
 #include <DotNet/UnityEngine/Quaternion.h>
 #include <DotNet/UnityEngine/Transform.h>
 #include <DotNet/UnityEngine/Vector3.h>
-#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 using namespace CesiumGeometry;
 using namespace CesiumGeospatial;
@@ -23,6 +25,16 @@ using namespace DotNet;
 namespace CesiumForUnityNative {
 
 namespace {
+
+const CesiumGeospatial::Ellipsoid&
+getAnchorEllipsoid(const ::DotNet::CesiumForUnity::CesiumGlobeAnchor& anchor) {
+  anchor.UpdateGeoreferenceIfNecessary();
+  CesiumForUnity::CesiumGeoreference georeference = anchor._georeference();
+  if (georeference == nullptr) {
+    return CesiumGeospatial::Ellipsoid::WGS84;
+  }
+  return georeference.ellipsoid().NativeImplementation().GetEllipsoid();
+}
 
 GlobeAnchor createOrUpdateNativeGlobeAnchorFromEcef(
     const ::DotNet::CesiumForUnity::CesiumGlobeAnchor& anchor,
@@ -37,7 +49,8 @@ GlobeAnchor createOrUpdateNativeGlobeAnchorFromEcef(
         UnityTransforms::fromUnity(anchor._localToGlobeFixedMatrix()));
     cppAnchor.setAnchorToFixedTransform(
         UnityTransforms::fromUnity(newLocalToGlobeFixedMatrix),
-        anchor.adjustOrientationForGlobeWhenMoving());
+        anchor.adjustOrientationForGlobeWhenMoving(),
+        getAnchorEllipsoid(anchor));
     return cppAnchor;
   }
 }
@@ -61,7 +74,8 @@ GlobeAnchor createOrUpdateNativeGlobeAnchorFromLocal(
     cppAnchor.setAnchorToLocalTransform(
         local,
         newModelToLocal,
-        anchor.adjustOrientationForGlobeWhenMoving());
+        anchor.adjustOrientationForGlobeWhenMoving(),
+        getAnchorEllipsoid(anchor));
     return cppAnchor;
   }
 }
@@ -102,10 +116,13 @@ void updateAnchorFromCpp(
     anchor._lastLocalRotation(transform.localRotation());
     anchor._lastLocalScale(transform.localScale());
     anchor._lastLocalsAreValid(true);
+    anchor._lastEllipsoidRadii(georeference.ellipsoid().radii());
   }
 }
 
-LocalHorizontalCoordinateSystem createEastUpNorth(const GlobeAnchor& anchor) {
+LocalHorizontalCoordinateSystem createEastUpNorth(
+    const GlobeAnchor& anchor,
+    const CesiumGeospatial::Ellipsoid& ellipsoid) {
   glm::dvec3 ecefPosition;
   Transforms::computeTranslationRotationScaleFromMatrix(
       anchor.getAnchorToFixedTransform(),
@@ -118,7 +135,8 @@ LocalHorizontalCoordinateSystem createEastUpNorth(const GlobeAnchor& anchor) {
       LocalDirection::East,
       LocalDirection::Up,
       LocalDirection::North,
-      1.0);
+      1.0,
+      ellipsoid);
 }
 
 } // namespace
@@ -154,7 +172,8 @@ CesiumGlobeAnchorImpl::GetLocalToEastUpNorthRotation(
   GlobeAnchor cppAnchor(
       UnityTransforms::fromUnity(anchor._localToGlobeFixedMatrix()));
 
-  LocalHorizontalCoordinateSystem eastUpNorth = createEastUpNorth(cppAnchor);
+  LocalHorizontalCoordinateSystem eastUpNorth =
+      createEastUpNorth(cppAnchor, getAnchorEllipsoid(anchor));
 
   glm::dmat4 modelToEastUpNorth =
       cppAnchor.getAnchorToLocalTransform(eastUpNorth);
@@ -174,7 +193,10 @@ void CesiumGlobeAnchorImpl::SetLocalToEastUpNorthRotation(
   GlobeAnchor cppAnchor(
       UnityTransforms::fromUnity(anchor._localToGlobeFixedMatrix()));
 
-  LocalHorizontalCoordinateSystem eastUpNorth = createEastUpNorth(cppAnchor);
+  const CesiumGeospatial::Ellipsoid& ellipsoid = getAnchorEllipsoid(anchor);
+
+  LocalHorizontalCoordinateSystem eastUpNorth =
+      createEastUpNorth(cppAnchor, ellipsoid);
 
   glm::dmat4 modelToEastUpNorth =
       cppAnchor.getAnchorToLocalTransform(eastUpNorth);
@@ -196,7 +218,8 @@ void CesiumGlobeAnchorImpl::SetLocalToEastUpNorthRotation(
   cppAnchor.setAnchorToLocalTransform(
       eastUpNorth,
       newModelToEastUpNorth,
-      false);
+      false,
+      ellipsoid);
 
   updateAnchorFromCpp(anchor, cppAnchor);
 }

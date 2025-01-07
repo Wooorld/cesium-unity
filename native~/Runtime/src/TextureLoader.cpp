@@ -21,7 +21,7 @@ namespace CesiumForUnityNative {
 
 namespace {
 UnityEngine::TextureFormat
-getCompressedPixelFormat(const CesiumGltf::ImageCesium& image) {
+getCompressedPixelFormat(const CesiumGltf::ImageAsset& image) {
   switch (image.compressedPixelFormat) {
   case GpuCompressedPixelFormat::ETC1_RGB:
     return UnityEngine::TextureFormat::ETC_RGB4;
@@ -55,7 +55,7 @@ getCompressedPixelFormat(const CesiumGltf::ImageCesium& image) {
 }
 
 UnityEngine::TextureFormat
-getUncompressedPixelFormat(const CesiumGltf::ImageCesium& image) {
+getUncompressedPixelFormat(const CesiumGltf::ImageAsset& image) {
   switch (image.channels) {
   case 1:
     return UnityEngine::TextureFormat::R8;
@@ -72,7 +72,7 @@ getUncompressedPixelFormat(const CesiumGltf::ImageCesium& image) {
 } // namespace
 
 UnityEngine::Texture
-TextureLoader::loadTexture(const CesiumGltf::ImageCesium& image) {
+TextureLoader::loadTexture(const CesiumGltf::ImageAsset& image, bool sRGB) {
   CESIUM_TRACE("TextureLoader::loadTexture");
   std::int32_t mipCount =
       image.mipPositions.empty() ? 1 : std::int32_t(image.mipPositions.size());
@@ -85,7 +85,7 @@ TextureLoader::loadTexture(const CesiumGltf::ImageCesium& image) {
   }
 
   UnityEngine::Texture2D
-      result(image.width, image.height, textureFormat, mipCount, false);
+      result(image.width, image.height, textureFormat, mipCount, !sRGB);
   result.hideFlags(UnityEngine::HideFlags::HideAndDontSave);
 
   Unity::Collections::NativeArray1<std::uint8_t> textureData =
@@ -107,7 +107,7 @@ TextureLoader::loadTexture(const CesiumGltf::ImageCesium& image) {
     std::uint8_t* pWritePosition = pixels;
     const std::byte* pReadBuffer = image.pixelData.data();
 
-    for (const ImageCesiumMipPosition& mip : image.mipPositions) {
+    for (const ImageAssetMipPosition& mip : image.mipPositions) {
       size_t start = mip.byteOffset;
       size_t end = mip.byteOffset + mip.byteSize;
       if (start >= textureLength || end > textureLength)
@@ -125,10 +125,11 @@ TextureLoader::loadTexture(const CesiumGltf::ImageCesium& image) {
 
 UnityEngine::Texture TextureLoader::loadTexture(
     const CesiumGltf::Model& model,
-    std::int32_t textureIndex) {
+    std::int32_t textureIndex,
+    bool sRGB) {
   const Texture* pTexture = Model::getSafe(&model.textures, textureIndex);
   if (pTexture) {
-    return TextureLoader::loadTexture(model, *pTexture);
+    return TextureLoader::loadTexture(model, *pTexture, sRGB);
   } else {
     return UnityEngine::Texture(nullptr);
   }
@@ -136,14 +137,15 @@ UnityEngine::Texture TextureLoader::loadTexture(
 
 UnityEngine::Texture TextureLoader::loadTexture(
     const CesiumGltf::Model& model,
-    const CesiumGltf::Texture& texture) {
+    const CesiumGltf::Texture& texture,
+    bool sRGB) {
   const Image* pImage = Model::getSafe(&model.images, texture.source);
   if (!pImage) {
     return UnityEngine::Texture(nullptr);
   }
 
-  const ImageCesium& imageCesium = pImage->cesium;
-  UnityEngine::Texture unityTexture = loadTexture(imageCesium);
+  const ImageAsset& imageCesium = *pImage->pAsset;
+  UnityEngine::Texture unityTexture = loadTexture(imageCesium, sRGB);
 
   const Sampler* pSampler = Model::getSafe(&model.samplers, texture.sampler);
   if (pSampler) {

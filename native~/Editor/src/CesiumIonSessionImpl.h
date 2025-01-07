@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CesiumImpl.h"
+
 #include <CesiumAsync/AsyncSystem.h>
 #include <CesiumAsync/IAssetAccessor.h>
 #include <CesiumAsync/SharedFuture.h>
@@ -33,7 +35,7 @@ class Token;
 } // namespace CesiumIonClient
 
 namespace CesiumForUnityNative {
-class CesiumIonSessionImpl {
+class CesiumIonSessionImpl : public CesiumImpl<CesiumIonSessionImpl> {
 public:
   CesiumIonSessionImpl(const DotNet::CesiumForUnity::CesiumIonSession& session);
   ~CesiumIonSessionImpl();
@@ -60,6 +62,8 @@ public:
   IsDefaultsLoaded(const DotNet::CesiumForUnity::CesiumIonSession& session);
   bool
   IsLoadingDefaults(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  bool IsAuthenticationRequired(
+      const DotNet::CesiumForUnity::CesiumIonSession& session);
 
   void Connect(const DotNet::CesiumForUnity::CesiumIonSession& session);
   void Resume(const DotNet::CesiumForUnity::CesiumIonSession& session);
@@ -82,16 +86,6 @@ public:
   void RefreshTokens(const DotNet::CesiumForUnity::CesiumIonSession& session);
   void RefreshDefaults(const DotNet::CesiumForUnity::CesiumIonSession& session);
 
-  void refreshProfile();
-  void refreshAssets();
-  void refreshTokens();
-  void refreshDefaults();
-
-  bool refreshProfileIfNeeded();
-  bool refreshAssetsIfNeeded();
-  bool refreshTokensIfNeeded();
-  bool refreshDefaultsIfNeeded();
-
   CesiumAsync::Future<CesiumIonClient::Response<CesiumIonClient::Token>>
   findToken(const std::string& token) const;
 
@@ -102,21 +96,51 @@ public:
   void invalidateProjectDefaultTokenDetails();
 
   const std::optional<CesiumIonClient::Connection>& getConnection() const;
-  const CesiumIonClient::Profile& getProfile();
-  const CesiumIonClient::Assets& getAssets();
-  const std::vector<CesiumIonClient::Token>& getTokens();
-  const CesiumIonClient::Defaults& getDefaults();
+  const CesiumIonClient::Profile&
+  getProfile(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  const CesiumIonClient::Assets&
+  getAssets(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  const std::vector<CesiumIonClient::Token>&
+  getTokens(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  const CesiumIonClient::ApplicationData& getAppData();
+  const CesiumIonClient::Defaults&
+  getDefaults(const DotNet::CesiumForUnity::CesiumIonSession& session);
 
   const std::shared_ptr<CesiumAsync::IAssetAccessor>& getAssetAccessor() const;
   const CesiumAsync::AsyncSystem& getAsyncSystem() const;
   CesiumAsync::AsyncSystem& getAsyncSystem();
 
 private:
-  void startQueuedLoads();
+  void refreshProfile(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  void refreshAssets(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  void refreshTokens(const DotNet::CesiumForUnity::CesiumIonSession& session);
+  void refreshDefaults(const DotNet::CesiumForUnity::CesiumIonSession& session);
+
+  bool refreshProfileIfNeeded(
+      const DotNet::CesiumForUnity::CesiumIonSession& session);
+  bool refreshAssetsIfNeeded(
+      const DotNet::CesiumForUnity::CesiumIonSession& session);
+  bool refreshTokensIfNeeded(
+      const DotNet::CesiumForUnity::CesiumIonSession& session);
+  bool refreshDefaultsIfNeeded(
+      const DotNet::CesiumForUnity::CesiumIonSession& session);
+
+  void
+  startQueuedLoads(const DotNet::CesiumForUnity::CesiumIonSession& session);
+
+  /**
+   * If the {@link _appData} field has no value, this method will request the
+   * ion server's /appData endpoint to obtain its data.
+   * @returns A future that resolves to true if _appData is present or false if
+   * it couldn't be fetched.
+   */
+  CesiumAsync::Future<bool>
+  ensureAppDataLoaded(const DotNet::CesiumForUnity::CesiumIonSession& session);
 
   CesiumAsync::AsyncSystem _asyncSystem;
   std::shared_ptr<CesiumAsync::IAssetAccessor> _pAssetAccessor;
 
+  std::optional<CesiumIonClient::ApplicationData> _appData;
   std::optional<CesiumIonClient::Connection> _connection;
   std::optional<CesiumIonClient::Profile> _profile;
   std::optional<CesiumIonClient::Assets> _assets;

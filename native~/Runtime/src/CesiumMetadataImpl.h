@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CesiumImpl.h"
+
 #include <CesiumGltf/AccessorUtility.h>
 #include <CesiumGltf/Model.h>
 
@@ -21,12 +23,10 @@ class Transform;
 
 namespace CesiumForUnityNative {
 
-class CesiumMetadataImpl {
+class CesiumMetadataImpl : public CesiumImpl<CesiumMetadataImpl> {
 public:
-  ~CesiumMetadataImpl(){};
-  CesiumMetadataImpl(const DotNet::CesiumForUnity::CesiumMetadata& metadata){};
-  void
-  JustBeforeDelete(const DotNet::CesiumForUnity::CesiumMetadata& metadata){};
+  CesiumMetadataImpl(const DotNet::CesiumForUnity::CesiumMetadata& metadata);
+  ~CesiumMetadataImpl();
 
   void addMetadata(
       int32_t instanceID,
