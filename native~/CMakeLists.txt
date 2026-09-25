@@ -6,6 +6,12 @@ project(CesiumForUnityNative
     LANGUAGES CXX C
 )
 
+# By default, vcpkg (or is it cmake?) will try to link against the Debug version
+# of the vcpkg libraries when we build the RelWithDebInfo configuration. Tell it
+# to prefer Release instead. vcpkg Release builds DO have debug symbols, just like
+# RelWithDebInfo.
+SET(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO "RelWithDebInfo;Release;")
+
 # When building for the Editor, both Runtime and Editor assemblies are
 # written to the Editor directory so that Unity won't load them in
 # a standalone build.
@@ -21,13 +27,63 @@ if (CESIUM_TRACING_ENABLED)
     add_compile_definitions(CESIUM_TRACING_ENABLED=1)
 endif()
 
+# In Debug builds on Windows, the default _ITERATOR_DEBUG_LEVEL=2 makes things _really_ slow,
+# for little benefit. Use a more reasonable debug level.
+if(WIN32)
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /D_ITERATOR_DEBUG_LEVEL=1")
+endif()
+
 # Static libraries are eventually built into shared libraries, so we need
 # position independent code.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "WindowsStore")
+  # Link with MSVC static runtime library. This is not supported on UWP / WindowsStore.
+  set(CESIUM_MSVC_STATIC_RUNTIME_ENABLED ON)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+  # This setting applies to tidy-html5
+  set(USE_STATIC_RUNTIME ON)
+endif()
+
 set(BUILD_SHARED_LIB OFF)
-set( SUPPORT_CONSOLE_APP OFF)
+set(SUPPORT_CONSOLE_APP OFF)
+set(CMAKE_POLICY_VERSION_MINIMUM "3.5")
 add_subdirectory(extern/tidy-html5 EXCLUDE_FROM_ALL)
+
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
+  # Make sure we use the same compiler options as cesium-native. Yes, this is like
+  # using a giant sledgehammer to pound in a tack. Watch your fingers.
+  set(CESIUM_TARGET_WASM ON)
+  include(extern/cesium-native/cmake/compiler.cmake)
+
+  # The version of Emscripten included with Unity doesn't include sys/utime.h,
+  # so tell tidy-html5 not to use it.
+  target_compile_definitions(
+    tidy-static
+    PUBLIC
+      HAS_FUTIME=0
+  )
+
+  target_compile_options(
+    tidy-static
+    PRIVATE
+      -pthread
+      -msimd128
+      -mnontrapping-fptoint
+      -mbulk-memory
+      -fwasm-exceptions
+      -sSUPPORT_LONGJMP=wasm
+  )
+
+  if (CESIUM_WASM64)
+    target_compile_options(
+      tidy-static
+      PRIVATE
+        -sMEMORY64=1
+    )
+  endif()
+endif()
 
 # Patch tidy-html5's sprtf.c to work on UWP. UWP doesn't have lstrlen, but
 # it's totally unnecessary because simply passing -1 as the length will do the same thing.
@@ -48,74 +104,169 @@ if (${CMAKE_SYSTEM_NAME} STREQUAL "Android")
   set(ANDROID_NDK ${CMAKE_ANDROID_NDK})
 endif()
 
-add_subdirectory(extern/cesium-native EXCLUDE_FROM_ALL)
+# vcpkg setup
+set(ENV{VCPKG_OVERLAY_PORTS} "${CMAKE_CURRENT_LIST_DIR}/vcpkg/ports")
+set(ENV{VCPKG_OVERLAY_TRIPLETS} "${CMAKE_CURRENT_LIST_DIR}/vcpkg/triplets")
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/extern/cesium-native/cmake/detect-vcpkg-triplet.cmake)
+
+if (NOT VCPKG_TRIPLET)
+    if (DEFINED ENV{VCPKG_TRIPLET})
+        set(VCPKG_TRIPLET "$ENV{VCPKG_TRIPLET}")
+    elseif(DETECTED_VCPKG_TRIPLET_ERROR)
+        message(FATAL_ERROR "${DETECTED_VCPKG_TRIPLET_ERROR}")
+    elseif(CESIUM_WASM64 AND "${DETECTED_VCPKG_TRIPLET}" STREQUAL "wasm32-emscripten")
+        set(VCPKG_TRIPLET wasm64-emscripten-unity)
+    else()
+        set(VCPKG_TRIPLET "${DETECTED_VCPKG_TRIPLET}-unity")
+    endif()
+endif()
+
+# We never need any of cesium-native's header files to be installed.
+set(CESIUM_INSTALL_HEADERS OFF)
+
+# We only need cesium-native's static lib files to be installed on iOS and Wasm.
+if (NOT IOS AND NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
+    set(CESIUM_INSTALL_STATIC_LIBS OFF)
+endif()
+
+add_subdirectory(extern/swl-variant)
+
+# We don't need cesium-native's Curl-based asset accessor, because Cesium for Unity supplies
+# its own built on .NET libraries.
+set(CESIUM_DISABLE_CURL ON)
+
+# In Emscripten builds _only_, using libjpeg-turbo leads to multiply-defined symbols because
+# Unity itself appears to include this library. So disable it for Wasm builds.
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
+  set(CESIUM_DISABLE_LIBJPEG_TURBO ON)
+endif()
+
+add_subdirectory(extern/cesium-native)
+
+# Don't build the cesium-native tests by default.
+set_target_properties(cesium-native-tests PROPERTIES EXCLUDE_FROM_ALL 1 EXCLUDE_FROM_DEFAULT_BUILD 1)
 
 # Enum flags is a header-only library without a CMakeLists.txt
 file(GLOB ENUM_FLAGS_HEADERS ${CMAKE_CURRENT_LIST_DIR}/extern/enum-flags/include/*.hpp)
 add_library(enum-flags INTERFACE ${ENUM_FLAGS_HEADERS})
 
-add_subdirectory(Runtime)
+get_filename_component(toolchainFile "${CMAKE_TOOLCHAIN_FILE}" NAME)
+if(toolchainFile STREQUAL "Emscripten.cmake")
+    set(CESIUM_TARGET_WASM ON)
+endif()
+
+file(GLOB_RECURSE CESIUMFORUNITYNATIVE_SOURCES CONFIGURE_DEPENDS src/Runtime/*.cpp ${REINTEROP_GENERATED_DIRECTORY}/src/*.cpp)
+file(GLOB_RECURSE CESIUMFORUNITYNATIVE_HEADERS CONFIGURE_DEPENDS src/Runtime/*.h ${REINTEROP_GENERATED_DIRECTORY}/src/*.h)
+
+if (${CMAKE_SYSTEM_NAME} STREQUAL "iOS" OR CESIUM_TARGET_WASM)
+    add_library(CesiumForUnityNative STATIC)
+else()
+    add_library(CesiumForUnityNative SHARED)
+endif()
+
+target_sources(
+  CesiumForUnityNative
+    PRIVATE
+        ${CESIUMFORUNITYNATIVE_SOURCES}
+        ${CESIUMFORUNITYNATIVE_HEADERS}
+)
+
+target_include_directories(
+  CesiumForUnityNative
+    PRIVATE
+        src/Runtime
+        ${REINTEROP_GENERATED_DIRECTORY}/src
+        ${REINTEROP_GENERATED_DIRECTORY}/include
+        # tidy-html5 doesn't use target_include_directories, so add it manually
+        extern/tidy-html5/include
+        # same with enum-flags
+        extern/enum-flags/include)
+
+target_link_libraries(
+  CesiumForUnityNative
+    PUBLIC
+      Cesium3DTilesSelection
+      CesiumAsync
+      CesiumIonClient
+      CesiumVectorOverlays
+    PRIVATE
+      tidy-static
+      enum-flags
+      swl-variant
+)
+
+# cpp-httplib, as of v0.26.0, seems to be missing a required dependency on CoreServices on macOS, so add it here.
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
+  target_link_libraries(
+    CesiumForUnityNative
+    PRIVATE
+      "-framework CoreServices"
+  )
+endif()
+
+set_target_properties(
+  CesiumForUnityNative
+    PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+)
+
+if (MSVC)
+  target_compile_options(
+    CesiumForUnityNative
+    PRIVATE
+      /bigobj
+  )
+endif()
+
+# Android 15+ devices may use 16 KB memory pages. Support them by aligning
+# ELF segments to 16 KB. NDK r28+ does this by default; for older NDK versions
+# we add the linker flags explicitly.
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Android")
+  target_link_options(
+    CesiumForUnityNative
+    PRIVATE
+      "-Wl,-z,max-page-size=16384"
+      "-Wl,-z,common-page-size=16384"
+  )
+endif()
+
+target_compile_definitions(
+  CesiumForUnityNative
+  PUBLIC
+    TIDY_STATIC
+    SWL_VARIANT_NO_CONSTEXPR_EMPLACE
+)
+
+install(FILES $<TARGET_FILE:CesiumForUnityNative> DESTINATION ".")
 
 if (EDITOR)
-  add_subdirectory(Editor)
+  # If we're building for the Unity Editor, set a #define accordingly.
+  target_compile_definitions(CesiumForUnityNative PRIVATE UNITY_EDITOR)
+
+  file(GLOB_RECURSE CESIUMFORUNITYNATIVEEDITOR_SOURCES CONFIGURE_DEPENDS src/Editor/*.cpp)
+  file(GLOB_RECURSE CESIUMFORUNITYNATIVEEDITOR_HEADERS CONFIGURE_DEPENDS src/Editor/*.h)
+
+  target_sources(
+      CesiumForUnityNative
+      PRIVATE
+          ${CESIUMFORUNITYNATIVEEDITOR_SOURCES}
+          ${CESIUMFORUNITYNATIVEEDITOR_HEADERS}
+  )
+
+  target_include_directories(
+      CesiumForUnityNative
+      PRIVATE
+          src/Editor
+  )
 endif()
+
+set(LIB_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR})
 
 # Specify all targets that need to compile bitcode
-if (${CMAKE_SYSTEM_NAME} STREQUAL "iOS")
-    set (ALL_TARGETS
-        CesiumForUnityNative-Runtime
-        Async++
-        Cesium3DTilesContent
-        Cesium3DTilesReader
-        Cesium3DTilesSelection
-        CesiumAsync
-        CesiumGeometry
-        CesiumGeospatial
-        CesiumGltf
-        CesiumGltfContent
-        CesiumGltfReader
-        CesiumJsonReader
-        CesiumRasterOverlays
-        CesiumUtility
-        draco_attributes
-        draco_compression_attributes_dec
-        draco_compression_bit_coders
-        draco_compression_entropy
-        draco_compression_decode
-        draco_compression_mesh_dec
-        draco_compression_point_cloud_dec
-        draco_core
-        draco_mesh
-        draco_metadata
-        draco_metadata_dec
-        draco_point_cloud
-        draco_points_dec
-        draco_static
-        expected-lite
-        GSL
-        httplib
-        ktx_read
-        meshoptimizer
-        modp_b64
-        spdlog
-        sqlite3
-        s2geometry
-        tinyxml2
-        tidy-static
-        uriparser
-        webpdecode
-        webpdecoder
-        webpdspdecode
-        webputils
-        webputilsdecode
-        zlibstatic
-    )
-    set(MESHOPT_BUILD_SHARED_LIBS OFF BOOL FORCE)
-    install(TARGETS tidy-static)
-    install(TARGETS ${ALL_TARGETS} PUBLIC_HEADER EXCLUDE_FROM_ALL)
-    set_target_properties(cesium-native-tests PROPERTIES EXCLUDE_FROM_ALL 1 EXCLUDE_FROM_DEFAULT_BUILD 1)
-    set_target_properties(tidy-static PROPERTIES EXCLUDE_FROM_ALL 0 EXCLUDE_FROM_DEFAULT_BUILD 0)
-    set_target_properties(${ALL_TARGETS} PROPERTIES XCODE_ATTRIBUTE_ENABLE_BITCODE "YES")
+if (${CMAKE_SYSTEM_NAME} STREQUAL "iOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
+  install(TARGETS tidy-static)
+  set_target_properties(tidy-static PROPERTIES EXCLUDE_FROM_ALL 0 EXCLUDE_FROM_DEFAULT_BUILD 0)
 endif()
-
-

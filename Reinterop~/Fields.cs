@@ -42,6 +42,10 @@ namespace Reinterop
             // TODO: Implement these as functions that call into the C#?
             if (field.IsStatic)
                 return;
+                
+            // Skip any fields with an "Ignore" attribute.
+            if (field.GetAttributes().Where(attrib => attrib.AttributeClass != null && (attrib.AttributeClass.Name == "IgnoreAttribute")).Any())
+                return;
 
             string fieldName = CSharpTypeUtility.GetFieldName(field);
             bool isPrivate = CSharpTypeUtility.GetFieldIsPrivate(field);
@@ -89,6 +93,10 @@ namespace Reinterop
             }
 
             bool hasStructRewrite = Interop.RewriteStructReturn(ref getParameters, ref getType, ref getInteropType);
+
+            // Add a parameter in which to return the exception, if there is one.
+            getParameters = getParameters.Concat(new[] { (ParameterName: "reinteropException", CallSiteName: "&reinteropException", Type: CppType.VoidPointerPointer, InteropType: CppType.VoidPointerPointer) });
+            interopSetParameters = interopSetParameters + ", void** reinteropException";
 
             var interopGetParameters = getParameters.Select(parameter => $"{parameter.InteropType.GetFullyQualifiedName()} {parameter.ParameterName}");
             var interopGetParametersCall = getParameters.Select(parameter => parameter.Type.GetConversionToInteropType(context, parameter.CallSiteName));
@@ -145,7 +153,11 @@ namespace Reinterop
 
             string[] invocation = new[]
             {
+                $"void* reinteropException = nullptr;",
                 $"auto result = Field_get_{field.Name}({string.Join(", ", interopGetParametersCall)});",
+                $"if (reinteropException != nullptr) {{",
+                $"  throw Reinterop::ReinteropNativeException(::DotNet::System::Exception(::DotNet::Reinterop::ObjectHandle(reinteropException)));",
+                $"}}",
                 $"return {getType.GetConversionFromInteropType(context, "result")};"
             };
             if (hasStructRewrite)
@@ -154,8 +166,12 @@ namespace Reinterop
                 {
                     invocation = new[]
                     {
+                        $"void* reinteropException = nullptr;",
                         $"{getType.GenericArguments.FirstOrDefault().GetFullyQualifiedName()} result;",
                         $"std::uint8_t resultIsValid = Field_get_{field.Name}({string.Join(", ", interopGetParametersCall)});",
+                        $"if (reinteropException != nullptr) {{",
+                        $"  throw Reinterop::ReinteropNativeException(::DotNet::System::Exception(::DotNet::Reinterop::ObjectHandle(reinteropException)));",
+                        $"}}",
                         $"return resultIsValid ? std::make_optional(std::move({getType.GetConversionFromInteropType(context, "result")})) : std::nullopt;"
                     };
                 }
@@ -163,8 +179,12 @@ namespace Reinterop
                 {
                     invocation = new[]
                     {
+                        $"void* reinteropException = nullptr;",
                         $"{getType.GetFullyQualifiedName()} result;",
                         $"Field_get_{field.Name}({string.Join(", ", interopGetParametersCall)});",
+                        $"if (reinteropException != nullptr) {{",
+                        $"  throw Reinterop::ReinteropNativeException(::DotNet::System::Exception(::DotNet::Reinterop::ObjectHandle(reinteropException)));",
+                        $"}}",
                         $"return {getType.GetConversionFromInteropType(context, "result")};"
                     };
                 }
@@ -181,7 +201,8 @@ namespace Reinterop
                 {
                     definition.Type,
                     getType,
-                    CppObjectHandle.GetCppType(context)
+                    CppObjectHandle.GetCppType(context),
+                    CppReinteropException.GetCppType(context)
                 }
             ));
 
@@ -189,14 +210,19 @@ namespace Reinterop
                 Content:
                     $$"""
                     void {{definition.Type.Name}}::{{field.Name}}({{setType.GetFullyQualifiedName()}} value){{(field.IsStatic ? "" : " const")}} {
-                        Field_set_{{field.Name}}({{interopSetParametersCall}});
+                        void* reinteropException = nullptr;
+                        Field_set_{{field.Name}}({{interopSetParametersCall}}, &reinteropException);
+                        if (reinteropException != nullptr) {
+                            throw Reinterop::ReinteropNativeException(::DotNet::System::Exception(::DotNet::Reinterop::ObjectHandle(reinteropException)));
+                        }
                     }
                     """,
                 TypeDefinitionsReferenced: new[]
                 {
                     definition.Type,
                     setType,
-                    CppObjectHandle.GetCppType(context)
+                    CppObjectHandle.GetCppType(context),
+                    CppReinteropException.GetCppType(context)
                 }
             ));
         }
