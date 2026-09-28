@@ -19,7 +19,7 @@ namespace Build
 
         public void Run(IEnumerable<string> args)
         {
-            string log = Path.GetTempFileName();
+            string log = "D:\\Wooorld\\cs\\build-log.log";
             File.WriteAllText(log, "", Encoding.UTF8);
 
             try
@@ -87,18 +87,18 @@ namespace Build
                 // Unity seems to keep the log file open longer than expected sometimes, preventing
                 // us from deleting it.
                 // Don't let this fail the build, but do retry a few times.
-                for (int i = 0; i < 5; ++i)
-                {
-                    try
-                    {
-                        File.Delete(log);
-                        break;
-                    }
-                    catch (IOException)
-                    {
-                    }
-                    Thread.Sleep(1000);
-                }
+                // for (int i = 0; i < 5; ++i)
+                // {
+                //     try
+                //     {
+                //         File.Delete(log);
+                //         break;
+                //     }
+                //     catch (IOException)
+                //     {
+                //     }
+                //     Thread.Sleep(1000);
+                // }
             }
         }
 
